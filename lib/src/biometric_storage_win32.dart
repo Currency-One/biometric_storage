@@ -38,19 +38,15 @@ class Win32BiometricStoragePlugin extends BiometricStorage {
   Future<bool> linuxCheckAppArmorError() async => false;
 
   @override
-  Future<bool> delete(
-    String name,
-    PromptInfo promptInfo,
-  ) async {
-    final namePointer = TEXT(name);
+  Future<bool> delete(String name, PromptInfo promptInfo) async {
+    final namePointer = name.toPcwstr(allocator: calloc);
     try {
-      final result = CredDelete(namePointer, CRED_TYPE_GENERIC, 0);
-      if (result != TRUE) {
-        final errorCode = GetLastError();
-        if (errorCode == ERROR_NOT_FOUND) {
+      final result = CredDelete(namePointer, CRED_TYPE_GENERIC);
+      if (!result.value) {
+        if (result.error == ERROR_NOT_FOUND) {
           _logger.fine('Unable to find credential of name $name');
         } else {
-          _logger.warning('Error ($result): $errorCode');
+          _logger.warning('Error: ${result.error}');
         }
         return false;
       }
@@ -61,31 +57,35 @@ class Win32BiometricStoragePlugin extends BiometricStorage {
   }
 
   @override
-  Future<String?> read(
-    String name,
-    PromptInfo promptInfo,
-  ) async {
+  Future<String?> read(String name, PromptInfo promptInfo) async {
     _logger.finer('read($name)');
     final credPointer = calloc<Pointer<CREDENTIAL>>();
-    final namePointer = TEXT(name);
+    final namePointer = name.toPcwstr(allocator: calloc);
     try {
-      if (CredRead(namePointer, CRED_TYPE_GENERIC, 0, credPointer) != TRUE) {
-        final errorCode = GetLastError();
-        if (errorCode == ERROR_NOT_FOUND) {
+      final result = CredRead(namePointer, CRED_TYPE_GENERIC, credPointer);
+      if (!result.value) {
+        if (result.error == ERROR_NOT_FOUND) {
           _logger.fine('Unable to find credential of name $name');
         } else {
-          _logger.warning('Error: $errorCode ',
-              WindowsException(HRESULT_FROM_WIN32(errorCode)));
+          _logger.warning(
+            'Error: ${result.error} ',
+            WindowsException(result.error.toHRESULT()),
+          );
         }
         return null;
       }
       final cred = credPointer.value.ref;
-      final blob = cred.CredentialBlob.asTypedList(cred.CredentialBlobSize);
+      // Decode before CredFree() releases the memory the typed list points to.
+      final content = cred.CredentialBlobSize == 0
+          ? ''
+          : utf8.decode(
+              cred.CredentialBlob.asTypedList(cred.CredentialBlobSize),
+            );
 
       _logger.fine('CredFree()');
       CredFree(credPointer.value);
 
-      return utf8.decode(blob);
+      return content;
     } finally {
       _logger.fine('free(credPointer)');
       calloc.free(credPointer);
@@ -96,16 +96,16 @@ class Win32BiometricStoragePlugin extends BiometricStorage {
   }
 
   @override
-  Future<void> write(
-    String name,
-    String content,
-    PromptInfo promptInfo,
-  ) async {
+  Future<void> write(String name, String content, PromptInfo promptInfo) async {
     _logger.fine('write()');
     final examplePassword = utf8.encode(content);
-    final blob = examplePassword.allocatePointer();
-    final namePointer = TEXT(name);
-    final userNamePointer = TEXT('flutter.biometric_storage');
+    final blob = examplePassword.isEmpty
+        ? nullptr.cast<Uint8>()
+        : examplePassword.toNative(allocator: calloc);
+    final namePointer = name.toPwstr(allocator: calloc);
+    final userNamePointer = 'flutter.biometric_storage'.toPwstr(
+      allocator: calloc,
+    );
 
     final credential = calloc<CREDENTIAL>()
       ..ref.Type = CRED_TYPE_GENERIC
@@ -116,14 +116,16 @@ class Win32BiometricStoragePlugin extends BiometricStorage {
       ..ref.CredentialBlobSize = examplePassword.length;
     try {
       final result = CredWrite(credential, 0);
-      if (result != TRUE) {
-        final errorCode = GetLastError();
+      if (!result.value) {
         throw BiometricStorageException(
-            'Error writing credential $name ($result): $errorCode');
+          'Error writing credential $name: ${result.error}',
+        );
       }
     } finally {
       _logger.fine('free');
-      calloc.free(blob);
+      if (blob != nullptr) {
+        calloc.free(blob);
+      }
       calloc.free(credential);
       calloc.free(namePointer);
       calloc.free(userNamePointer);
