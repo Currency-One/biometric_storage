@@ -15,10 +15,7 @@ let package = Package(
     targets: [
         .target(
             name: "biometric_storage",
-            dependencies: [],
-            cSettings: [
-                .headerSearchPath("include/biometric_storage")
-            ]
+            dependencies: []
         )
     ]
 )
